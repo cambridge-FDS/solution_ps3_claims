@@ -1,13 +1,9 @@
-# create and activate a fresh environment named ps3
+# Problem Set 3: Claims modelling exercise
 
-# see environment.yml for details
-
+```
 mamba env create
 conda activate ps3
 
 pre-commit install
 pip install --no-build-isolation -e .
-
-```
-
 ```
