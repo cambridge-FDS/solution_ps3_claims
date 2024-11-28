@@ -1,7 +1,9 @@
 # %%
+import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from dalex import Explainer
 from dask_ml.preprocessing import Categorizer
 from glum import GeneralizedLinearRegressor, TweedieDistribution
 from lightgbm import LGBMRegressor
@@ -257,4 +259,178 @@ ax.set(
 ax.legend(loc="upper left")
 plt.plot()
 
+# %%
+# Ex1
+# Step 1: Create a plot of the average claims per BonusMalus group
+weighted_avg_claims = df.groupby("BonusMalus").apply(
+    lambda group: np.average(group["PurePremium"], weights=group["Exposure"])
+)
+
+plt.figure(figsize=(10, 6))
+plt.plot(weighted_avg_claims.index, weighted_avg_claims, marker=".")
+plt.title("Weighted Average Claims per BonusMalus Group")
+plt.xlabel("BonusMalus")
+plt.ylabel("Weighted Average Claims")
+plt.grid()
+plt.show()
+
+# %%
+# Create a new model pipeline with monotonic constraints
+# Define numeric columns and predictors again (make sure it fits here, although this has been done before)
+numeric_cols = ["BonusMalus", "Density"]
+categoricals = ["VehBrand", "VehGas", "Region", "Area", "DrivAge", "VehAge", "VehPower"]
+predictors = categoricals + numeric_cols
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("numeric", StandardScaler(), numeric_cols),
+        ("cat", OneHotEncoder(sparse_output=False, drop="first"), categoricals),
+    ]
+)
+
+# Fit the preprocessor to the training data
+transformed_data = preprocessor.fit_transform(df_train[predictors])
+num_features = transformed_data.shape[1]
+
+# Define monotone constraints
+monotone_constraints = [
+    1 if "BonusMalus" in feature else 0
+    for feature in preprocessor.get_feature_names_out()
+]
+
+# Define the constrained LGBM pipeline
+constrained_lgbm = Pipeline(
+    [
+        ("preprocess", preprocessor),
+        (
+            "estimate",
+            LGBMRegressor(
+                objective="tweedie", monotone_constraints=monotone_constraints
+            ),
+        ),
+    ]
+)
+
+# Perform GridSearchCV with the constrained LGBM
+param_grid = {
+    "estimate__learning_rate": [0.01, 0.02],
+    "estimate__n_estimators": [100, 150],
+}
+cv = GridSearchCV(constrained_lgbm, param_grid, verbose=2)
+cv.fit(
+    df_train[predictors],
+    y.iloc[train],
+    estimate__sample_weight=df_train["Exposure"].values,
+)
+
+
+# %%
+# Cross-validate and predict using the best estimator
+df_test["pp_t_lgbm_constrained"] = cv.best_estimator_.predict(df_test[predictors])
+df_train["pp_t_lgbm_constrained"] = cv.best_estimator_.predict(df_train[predictors])
+
+
+def tweedie_deviance(y_true, y_pred, sample_weight):
+    return np.sum(
+        sample_weight
+        * (
+            y_true ** (2 - 1.5) / (2 - 1.5)
+            - y_true * y_pred ** (1 - 1.5) / (1 - 1.5)
+            + y_pred ** (2 - 1.5) / (2 - 1.5)
+        )
+    )
+
+
+print(
+    "training loss t_lgbm_constrained:  {}".format(
+        tweedie_deviance(
+            y.iloc[train], df_train["pp_t_lgbm_constrained"], df_train["Exposure"]
+        )
+        / np.sum(df_train["Exposure"])
+    )
+)
+
+print(
+    "testing loss t_lgbm_constrained:  {}".format(
+        tweedie_deviance(
+            y.iloc[test], df_test["pp_t_lgbm_constrained"], df_test["Exposure"]
+        )
+        / np.sum(df_test["Exposure"])
+    )
+)
+
+print(
+    "Total claim amount on test set, observed = {}, predicted = {}".format(
+        df["ClaimAmountCut"].values[test].sum(),
+        np.sum(df["Exposure"].values[test] * df_test["pp_t_lgbm_constrained"]),
+    )
+)
+
+# %%
+# Ex2 Plot the learning curve
+
+best_lgbm_estimator = cv.best_estimator_.named_steps["estimate"]
+
+
+best_lgbm_estimator.fit(
+    transformed_data,  # The transformed training data
+    y.iloc[train],
+    sample_weight=df_train["Exposure"].values,
+    eval_set=[
+        (transformed_data, y.iloc[train]),
+        (preprocessor.transform(df_test[predictors]), y.iloc[test]),
+    ],
+    eval_metric="tweedie",
+    eval_names=["train", "validation"],
+)
+
+# Plot the learning curve for Tweedie deviance
+lgb.plot_metric(best_lgbm_estimator.evals_result_, metric="tweedie")
+plt.xlabel("Boosting Round")
+plt.ylabel("tweedie")
+plt.title("Learning Curve (tweedie Deviance)")
+plt.grid()
+plt.show()
+
+
+# %%
+# exercise 5: SHAP
+# Define explainer objects for the two models
+
+
+explainer_glm = Explainer(t_glm1, X_test_t, y_test_t, label="GLM Benchmark")
+
+explainer_lgbm_constrained = Explainer(
+    cv.best_estimator_.named_steps["estimate"],
+    preprocessor.transform(df_test[predictors]),
+    y_test_t,
+    label="Constrained LGBM",
+)
+
+# Select the first observation from the test set
+observation = X_test_t.iloc[0:1]
+# Preprocess the observation before SHAP computation
+preprocessed_observation = constrained_lgbm.named_steps["preprocess"].transform(
+    observation
+)
+
+
+# %%
+# Compute SHAP values for the observation
+shap_glm = explainer_glm.predict_parts(observation, type="shap")
+shap_lgbm_constrained = explainer_lgbm_constrained.predict_parts(
+    preprocessed_observation, type="shap"
+)
+# %%
+print(shap_glm)
+print(shap_lgbm_constrained)
+# Plot SHAP values for the GLM model
+shap_glm.plot(title="SHAP Values for GLM Benchmark")
+
+# Plot SHAP values for the Constrained LGBM model
+shap_lgbm_constrained.plot(title="SHAP Values for Constrained LGBM")
+
+# The result shows that in GLM model, BonusMAlus has the greatest negative influence to the prediction,
+# and it's the same in LGBM case. They deviate at VelAge, where VehGas. To be honest I'm not sure the variable
+# appeared on the LGBM represent the same variable as GLM, but the one which has the most negative influence and
+# the two with biggest positive influence have the same trend and not too different in their values.
 # %%
