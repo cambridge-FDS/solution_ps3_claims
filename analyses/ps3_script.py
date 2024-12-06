@@ -1,7 +1,10 @@
 # %%
+import dalex as dx
+import lightgbm as lgb
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from dask_ml.preprocessing import Categorizer
 from glum import GeneralizedLinearRegressor, TweedieDistribution
 from lightgbm import LGBMRegressor
@@ -12,6 +15,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, SplineTransformer, StandardScaler
 
 from ps3.data import create_sample_split, load_transform
+from ps3.evaluation import evaluate_predictions, lorenz_curve
 
 # %%
 # load data
@@ -52,25 +56,12 @@ pd.DataFrame(
 df_test["pp_t_glm1"] = t_glm1.predict(X_test_t)
 df_train["pp_t_glm1"] = t_glm1.predict(X_train_t)
 
-print(
-    "training loss t_glm1:  {}".format(
-        TweedieDist.deviance(y_train_t, df_train["pp_t_glm1"], sample_weight=w_train_t)
-        / np.sum(w_train_t)
-    )
-)
-
-print(
-    "testing loss t_glm1:  {}".format(
-        TweedieDist.deviance(y_test_t, df_test["pp_t_glm1"], sample_weight=w_test_t)
-        / np.sum(w_test_t)
-    )
-)
-
-print(
-    "Total claim amount on test set, observed = {}, predicted = {}".format(
-        df["ClaimAmountCut"].values[test].sum(),
-        np.sum(df["Exposure"].values[test] * t_glm1.predict(X_test_t)),
-    )
+pd.set_option("display.float_format", lambda x: "%.3f" % x)
+evaluate_predictions(
+    df_test,
+    outcome_column="PurePremium",
+    exposure_column="Exposure",
+    preds_column="pp_t_glm1",
 )
 # %%
 # Let's add splines for BonusMalus and Density and use a pipeline
@@ -125,46 +116,62 @@ pd.DataFrame(
 df_test["pp_t_glm2"] = model_pipeline.predict(df_test)
 df_train["pp_t_glm2"] = model_pipeline.predict(df_train)
 
-print(
-    "training loss t_glm2:  {}".format(
-        TweedieDist.deviance(y_train_t, df_train["pp_t_glm2"], sample_weight=w_train_t)
-        / np.sum(w_train_t)
-    )
-)
-
-print(
-    "testing loss t_glm2:  {}".format(
-        TweedieDist.deviance(y_test_t, df_test["pp_t_glm2"], sample_weight=w_test_t)
-        / np.sum(w_test_t)
-    )
-)
-
-print(
-    "Total claim amount on test set, observed = {}, predicted = {}".format(
-        df["ClaimAmountCut"].values[test].sum(),
-        np.sum(df["Exposure"].values[test] * df_test["pp_t_glm2"]),
-    )
+evaluate_predictions(
+    df_test,
+    outcome_column="PurePremium",
+    exposure_column="Exposure",
+    preds_column="pp_t_glm2",
 )
 
 # %%
 # Let's use a GBM instead as an estimator
 model_pipeline = Pipeline([("estimate", LGBMRegressor(objective="tweedie"))])
 
-model_pipeline.fit(X_train_t, y_train_t, estimate__sample_weight=w_train_t)
+model_pipeline.fit(
+    X_train_t,
+    y_train_t,
+    estimate__sample_weight=w_train_t,
+    estimate__eval_set=[(X_test_t, y_test_t), (X_train_t, y_train_t)],
+)
 df_test["pp_t_lgbm"] = model_pipeline.predict(X_test_t)
 df_train["pp_t_lgbm"] = model_pipeline.predict(X_train_t)
-print(
-    "training loss t_lgbm:  {}".format(
-        TweedieDist.deviance(y_train_t, df_train["pp_t_lgbm"], sample_weight=w_train_t)
-        / np.sum(w_train_t)
-    )
+evaluate_predictions(
+    df_test,
+    outcome_column="PurePremium",
+    exposure_column="Exposure",
+    preds_column="pp_t_lgbm",
 )
 
-print(
-    "testing loss t_lgbm:  {}".format(
-        TweedieDist.deviance(y_test_t, df_test["pp_t_lgbm"], sample_weight=w_test_t)
-        / np.sum(w_test_t)
-    )
+# %%
+model_pipeline = Pipeline(
+    [
+        (
+            "estimate",
+            LGBMRegressor(
+                objective="tweedie",
+                n_estimators=1000,
+                learning_rate=0.1,
+                num_leaves=6,
+                early_stopping_rounds=25,
+            ),
+        )
+    ]
+)
+model_pipeline.fit(
+    X_train_t,
+    y_train_t,
+    estimate__sample_weight=w_train_t,
+    estimate__eval_set=[(X_test_t, y_test_t), (X_train_t, y_train_t)],
+)
+lgb.plot_metric(model_pipeline[0])
+
+df_test["pp_t_lgbm"] = model_pipeline.predict(X_test_t)
+df_train["pp_t_lgbm"] = model_pipeline.predict(X_train_t)
+evaluate_predictions(
+    df_test,
+    outcome_column="PurePremium",
+    exposure_column="Exposure",
+    preds_column="pp_t_lgbm",
 )
 
 # %%
@@ -181,54 +188,113 @@ cv = GridSearchCV(
     },
     verbose=2,
 )
-cv.fit(X_train_t, y_train_t, estimate__sample_weight=w_train_t)
+cv.fit(
+    X_train_t,
+    y_train_t,
+    estimate__sample_weight=w_train_t,
+    estimate__eval_set=[(X_test_t, y_test_t), (X_train_t, y_train_t)],
+)
 
+lgbm_unconstrained = cv.best_estimator_
 df_test["pp_t_lgbm"] = cv.best_estimator_.predict(X_test_t)
 df_train["pp_t_lgbm"] = cv.best_estimator_.predict(X_train_t)
 
-print(
-    "training loss t_lgbm:  {}".format(
-        TweedieDist.deviance(y_train_t, df_train["pp_t_lgbm"], sample_weight=w_train_t)
-        / np.sum(w_train_t)
-    )
+evaluate_predictions(
+    df_test,
+    outcome_column="PurePremium",
+    exposure_column="Exposure",
+    preds_column="pp_t_lgbm",
 )
 
-print(
-    "testing loss t_lgbm:  {}".format(
-        TweedieDist.deviance(y_test_t, df_test["pp_t_lgbm"], sample_weight=w_test_t)
-        / np.sum(w_test_t)
-    )
+# %%
+
+df_plot = (
+    df.groupby("BonusMalus")
+    .apply(lambda x: np.average(x["PurePremium"], weights=x["Exposure"]))
+    .reset_index(name="PurePremium")
 )
 
-print(
-    "Total claim amount on test set, observed = {}, predicted = {}".format(
-        df["ClaimAmountCut"].values[test].sum(),
-        np.sum(df["Exposure"].values[test] * df_test["pp_t_lgbm"]),
-    )
+sns.scatterplot(df_plot, x="BonusMalus", y="PurePremium")
+
+# %%
+
+# Constrained LGBM
+
+lgbm_constrained = Pipeline(
+    [
+        (
+            "estimate",
+            LGBMRegressor(
+                objective="tweedie", monotone_constraints=[0, 0, 0, 0, 0, 0, 0, 1, 0]
+            ),
+        )
+    ]
 )
+cv = GridSearchCV(
+    lgbm_constrained,
+    {
+        "estimate__learning_rate": [0.01, 0.02, 0.03, 0.04, 0.05, 0.1],
+        "estimate__n_estimators": [5000],
+    },
+    verbose=2,
+)
+cv.fit(
+    X_train_t,
+    y_train_t,
+    estimate__sample_weight=w_train_t,
+    estimate__eval_set=[(X_test_t, y_test_t), (X_train_t, y_train_t)],
+)
+
+
+df_test["pp_t_lgbm_constrained"] = cv.best_estimator_.predict(X_test_t)
+df_train["pp_t_lgbm_constrained"] = cv.best_estimator_.predict(X_train_t)
+
+# %%
+# Plot learning curve
+lgbm_constrained.fit(
+    X_train_t,
+    y_train_t,
+    estimate__eval_set=[(X_test_t, y_test_t), (X_train_t, y_train_t)],
+)
+
+lgb.plot_metric(lgbm_constrained[0])
+
+# %%
+evaluate_predictions(
+    df_test,
+    outcome_column="PurePremium",
+    exposure_column="Exposure",
+    preds_column="pp_t_lgbm_constrained",
+)
+
+# %%
+# Plot PDPs
+
+lgbm_constrained_exp = dx.Explainer(
+    lgbm_constrained, X_test_t, y_test_t, label="Constrained LGBM"
+)
+pdp_constrained = lgbm_constrained_exp.model_profile()
+
+lgbm_unconstrained_exp = dx.Explainer(
+    lgbm_unconstrained, X_test_t, y_test_t, label="Unconstrained LGBM"
+)
+pdp_unconstrained = lgbm_unconstrained_exp.model_profile()
+
+pdp_constrained.plot(pdp_unconstrained)
+
+# %%
+shap = lgbm_constrained_exp.predict_parts(X_test_t.head(1), type="shap")
+
+shap.plot()
 # %%
 # Let's compare the sorting of the pure premium predictions
-
-
-# Source: https://scikit-learn.org/stable/auto_examples/linear_model/plot_tweedie_regression_insurance_claims.html
-def lorenz_curve(y_true, y_pred, exposure):
-    y_true, y_pred = np.asarray(y_true), np.asarray(y_pred)
-    exposure = np.asarray(exposure)
-
-    # order samples by increasing predicted risk:
-    ranking = np.argsort(y_pred)
-    ranked_exposure = exposure[ranking]
-    ranked_pure_premium = y_true[ranking]
-    cumulated_claim_amount = np.cumsum(ranked_pure_premium * ranked_exposure)
-    cumulated_claim_amount /= cumulated_claim_amount[-1]
-    cumulated_samples = np.linspace(0, 1, len(cumulated_claim_amount))
-    return cumulated_samples, cumulated_claim_amount
 
 
 fig, ax = plt.subplots(figsize=(8, 8))
 
 for label, y_pred in [
     ("LGBM", df_test["pp_t_lgbm"]),
+    ("LGBM_constrained", df_test["pp_t_lgbm_constrained"]),
     ("GLM Benchmark", df_test["pp_t_glm1"]),
     ("GLM Splines", df_test["pp_t_glm2"]),
 ]:

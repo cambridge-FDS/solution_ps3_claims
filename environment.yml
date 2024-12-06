@@ -12,14 +12,16 @@ dependencies:
   - setuptools-scm
   # data
   - pandas
-  - numpy
+  - numpy<2
   - dask-ml
   - ydata-profiling
   # interactive
   - ipykernel
   # plots
   - matplotlib
+  - nbformat
   # ml
   - glum
   - lightgbm
-  - sklearn
+  - scikit-learn
+  - dalex
